@@ -1,0 +1,264 @@
+---
+title: "Parallel Computing in R"
+author: "Wei Shi"
+date: "04/17/2018"
+output:
+  ioslides_presentation: default
+  beamer_presentation: default
+  slidy_presentation: default
+editor_options: 
+  chunk_output_type: console
+---
+
+<style>
+pre {
+  overflow-x: auto;
+}
+pre code {
+  word-wrap: normal;
+  white-space: pre;
+}
+</style>
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+pkgs <- c("doParallel","doRNG")
+for (i in 1:length(pkgs)){
+    if (! pkgs[i] %in% installed.packages()){
+        install.packages(pkgs[i], dependencies = TRUE,
+                         repos = "https://cloud.r-project.org")
+    }
+}
+
+```
+
+## Motivation
+
+When working with R, we often encounter situations in which we need to repeat a
+computation, or a series of computations, many times.
+
+- `for` loop: VERY SLOW
+
+Almost all computers now have multicore processors, and as long as these computations do not need to communicate (i.e. they are **embarrassingly parallel**), they can be spread across multiple cores and executed in
+parallel, reducing computation time. Examples of these types of problems include:
+
+- Run a simulation model using multiple different parameter sets
+- Run multiple MCMC chains simultaneously
+- Bootstrapping, cross-validation, etc.
+
+## Is Parallel Computing suitable for you?
+
+Before parallelizing your R code, need answers to these questions:
+
+- Does your code run slow?
+ - If no, then do not bother, e.g. it is not wise to spend weeks on parallelizing a
+program that finished in 30 seconds
+- Is it parallelizable?
+ - If no, then do not bother, e.g. not much we can do in R if the target R function
+is written in C or Fortran
+
+## First Step in Parallelization: Performance Analysis
+
+- Purpose: locate the "hotspot" first
+- Two most frequent used methods in R
+ - system.time()
+ - Rprof() and summaryRprof()
+
+## System.time()
+```{r}
+ system.time({
+   A <- matrix(rnorm(1000*1000),1000,1000)
+   Ainv <- solve(A)
+   })
+```
+
+## Rprof() and summaryRprof()
+```{r}
+Rprof()
+A <- matrix(rnorm(1000*1000),1000,1000)
+Ainv <- solve(A)
+Rprof(NULL)
+summaryRprof()
+```
+
+## Forms of Parallelism in R
+
+- Implicit Parallelism: allows a compiler or interpreter to automatically exploit the parallelism inherent to the computations expressed by some of the language's constructs
+
+E.g. `pnmath` uses the Open MP parallel processing
+directives of recent compilers (such gcc 4.2 or later) for
+implicit parallelism by replacing a number of internal R
+functions with replacements that can make use of multiple
+cores --without any explicit requests from the user.
+
+- Explicit Parallelism
+
+Use parallel packages in R, we will focus on the `parallel` package
+
+## Explicit Parallelism: `parallel` Package
+
+By default, R will not take advantage of all the cores available on a computer. 
+
+In order to execute code in parallel, you have to first make the desired number of cores available to R by
+registering a ’parallel backend’, which effectively creates a cluster to which computations can
+be sent. Fortunately there are a number of packages that will handle the details
+of this process for you:
+
+- `doMC` (built on multicore, works for unix-alikes)
+- `doSNOW` (built on snow, works for Windows)
+- `doParallel` (built on parallel, works for both)
+
+The `parallel` package is essentially a merger of `multicore` and `snow`, and automatically uses
+the appropriate tool for your system.
+
+## Parallel Backends
+```{r}
+library(doParallel)
+
+# Find out how many cores are available 
+detectCores()
+
+# Create cluster with desired number of cores
+cl <- makeCluster(7)
+
+# Register cluster
+registerDoParallel(cl)
+
+# Find out how many cores are being used
+getDoParWorkers()
+
+```
+
+## Executing Computations in Parallel
+
+Basic Steps:
+
+- Split the problem into pieces
+- Execute in parallel
+- Collect the results
+
+## An Example Using `foreach`
+
+```{r}
+library(foreach)
+foreach(i = 1:3) %dopar% sqrt(i)
+
+# Use the concatenate function to combine results
+foreach(i = 1:3, .combine = c) %dopar% sqrt(i)
+
+```
+
+Other options: `"+"`, `"*"`, `cbind`, `rbind`
+
+## An Example Using `foreach`
+```{r}
+system.time(for(i in 1:50) sqrt(i))
+system.time(foreach(i = 1:50) %dopar% sqrt(i))
+```
+
+With small tasks, the overhead of scheduling the task and returning the result
+can be greater than the time to execute the task itself, resulting in poor performance.
+
+## A More Serious Example
+```{r}
+x <- iris[which(iris[,5] != "setosa"), c(1,5)]
+trials <- 10000
+system.time({ 
+  r <- foreach(icount(trials), .combine=cbind) %dopar% {
+    ind <- sample(100, 100, replace=TRUE)
+    result1 <- glm(x[ind,2]~x[ind,1], family=binomial(logit))
+    coefficients(result1)
+    }
+  })
+```
+
+## A More Serious Example
+```{r}
+system.time({ 
+  r <- foreach(icount(trials), .combine=cbind) %do% {
+    ind <- sample(100, 100, replace=TRUE)
+    result1 <- glm(x[ind,2]~x[ind,1], family=binomial(logit))
+    coefficients(result1)
+    }
+  })
+```
+
+## Parallel `apply` functions: `parApply`
+
+```{r}
+m <- matrix(rnorm(100000), ncol = 10)
+system.time(apply(m, 1, median))
+
+system.time(parApply(cl, m, 1, median))
+```
+
+## Random Number Generation
+
+```{r}
+library(doRNG)
+# Set the random number seed manually before calling foreach
+set.seed(123)
+# Replace %dopar% with %dorng%
+rand1 <- foreach(i = 1:5) %dorng% runif(3)
+# Or set seed using .options.RNG option in foreach
+rand2 <- foreach(i = 1:5, .options.RNG = 123) %dorng% runif(3)
+# The two sets of random numbers are identical (i.e. reproducible)
+identical(rand1, rand2)
+```
+
+##  Task-specific packages
+
+These packages can take advantage of a registered parallel backend without needing `foreach`:
+
+- **caret**: classification and regression training; cross-validation, etc; will automatically
+paralellize if a backend is registered
+- **dclone**: MCMC methods for maximum likelihood estimation, running BUGS chains in
+parallel
+- **pls**: partial least squares and principal component regression – built-in cross-validation
+tools can take advantage multicore by setting options
+- **plyr**: data manipulation and apply-like functions; can set options to run in parallel
+
+
+## Tips:
+
+- There is communication overhead to setting up cluster – not worth it for simple problems
+- Error handling – default is to stop if one of the taks produces an error, but you lose
+the output from any tasks that completed successfully; use `.errorhandling` option in
+`foreach` to control how errors should be treated
+- Can use ’Performance’ tab of the Windows Task Manager to double check that things
+are working correctly (should see CPU usage on the desired number of cores)
+- Shutting down cluster – when you’re done, be sure to close the parallel backend using
+`stopCluster(cl)`; otherwise you can run into problems later
+
+```{r}
+stopCluster(cl)
+```
+
+
+##  Less embarrassing parallel problems
+
+Multicore computing is also useful for carrying out single, large computations (e.g. inverting
+very large matrices, fitting linear models with ’Big Data’). In these cases, the cores are
+working together to carry out a single computation and the thus need to communicate (i.e.
+not ’embarrassingly parallel’ anymore). This type of parallel computation is considerably more
+difficult, but there are some packages that do most of the heavy lifting for you:
+
+- **HiPLAR**: High Performance Linear Algebra in R – automaticaly replaces default matrix
+commands with multicore computations; Linux only, installation not necessarily straightforward
+- **pbdR**: programming with big data in R – multicore matrix algebra and statistics;
+available for all OS, with potentially tractable install. Also has extensive introduction
+manual, ”Speaking R with a parallel accent.”
+
+## Reference and Resources
+
+[CRAN Task View for High-Performance Computing](https://cran.r-project.org/web/views/HighPerformanceComputing.html)
+
+[Vignettes for Parallel package](http://stat.ethz.ch/R-manual/R-devel/library/parallel/doc/parallel.pdf)
+
+[Speaking R with a parallel accent](https://cran.r-project.org/web/packages/pbdDEMO/vignettes/pbdDEMO-guide.pdf)
+
+
+
+
+
